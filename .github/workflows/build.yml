@@ -91,13 +91,10 @@ jobs:
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-              <uses-permission android:name="android.permission.READ_PHONE_STATE" />
 
               <application
                   android:allowBackup="true"
-                  android:label="iOS Status Bar"
+                  android:label="iOS Battery"
                   android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
                   <activity
@@ -115,13 +112,13 @@ jobs:
                       android:foregroundServiceType="specialUse">
                       <property
                           android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                          android:value="Draws custom battery and Wi-Fi icons over the status bar" />
+                          android:value="Draws a custom battery icon over the status bar" />
                   </service>
               </application>
           </manifest>
           EOF_FILE
           mkdir -p app/src/main/java/com/example/iosstatusbar
-          cat > app/src/main/java/com/example/iosstatusbar/StatusBarView.kt <<'EOF_FILE'
+          cat > app/src/main/java/com/example/iosstatusbar/BatteryView.kt <<'EOF_FILE'
           package com.example.iosstatusbar
 
           import android.content.Context
@@ -130,33 +127,27 @@ jobs:
           import android.graphics.Paint
           import android.graphics.Path
           import android.graphics.RectF
-          import android.graphics.Typeface
           import android.view.View
           import kotlin.math.max
 
-          /**
-           * Draws iOS-style signal bars, Wi-Fi, battery percentage and battery icon.
-           * Opaque background so the real (Samsung) icons underneath are hidden.
-           */
-          class StatusBarView(
+          /** iOS-style battery icon. Drawn in "dp units" and scaled by sizeScale. */
+          class BatteryView(
               context: Context,
-              private val light: Boolean,        // true = white background, dark icons
-              private val showPercent: Boolean
+              private val dark: Boolean,       // true = dark icon (for light backgrounds)
+              private val sizeScale: Float,    // 1.0 = normal size
+              private val bgColor: Int         // Color.TRANSPARENT = no background
           ) : View(context) {
 
               var level = 100
               var charging = false
               var powerSave = false
-              var wifiConnected = false
-              var wifiBars = 3        // 0..3 arcs
-              var cellBars = 4        // 0..4 bars
 
-              private val density = resources.displayMetrics.density
-              private fun dp(v: Float) = v * density
+              companion object {
+                  const val UNITS_W = 28f
+                  const val UNITS_H = 12.5f
+              }
 
-              private val fg = if (light) Color.BLACK else Color.WHITE
-              private val bg = if (light) Color.WHITE else Color.BLACK
-
+              private val fg = if (dark) Color.BLACK else Color.WHITE
               private val green = 0xFF30D158.toInt()
               private val yellow = 0xFFFFD60A.toInt()
               private val red = 0xFFFF453A.toInt()
@@ -164,31 +155,20 @@ jobs:
               private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
               private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                   style = Paint.Style.STROKE
-                  strokeCap = Paint.Cap.ROUND
+                  strokeWidth = 1.1f
               }
-              private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                  typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-                  textSize = dp(15f)
-                  color = fg
-              }
-
               private val rect = RectF()
               private val bolt = Path()
 
               override fun onDraw(c: Canvas) {
-                  c.drawColor(bg)
-                  val cy = height / 2f
-                  var x = width - dp(14f)
+                  if (bgColor != Color.TRANSPARENT) c.drawColor(bgColor)
 
-                  // ---- Battery ----
-                  val bodyW = dp(25f)
-                  val bodyH = dp(12.5f)
-                  val nubW = dp(1.8f)
-                  val nubGap = dp(1.2f)
-                  val bodyRight = x - nubGap - nubW
-                  val bodyLeft = bodyRight - bodyW
-                  val top = cy - bodyH / 2f
-                  val bottom = cy + bodyH / 2f
+                  val unit = resources.displayMetrics.density * sizeScale
+                  val ox = (width - UNITS_W * unit) / 2f
+                  val oy = (height - UNITS_H * unit) / 2f
+                  c.save()
+                  c.translate(ox, oy)
+                  c.scale(unit, unit)
 
                   val stateColor = when {
                       charging -> green
@@ -198,34 +178,31 @@ jobs:
                   }
 
                   // outline
-                  strokePaint.strokeWidth = dp(1.1f)
                   strokePaint.color = fg
                   strokePaint.alpha = 100
-                  val half = strokePaint.strokeWidth / 2f
-                  rect.set(bodyLeft + half, top + half, bodyRight - half, bottom - half)
-                  c.drawRoundRect(rect, dp(4f), dp(4f), strokePaint)
+                  rect.set(0.55f, 0.55f, 24.45f, 11.95f)
+                  c.drawRoundRect(rect, 4f, 4f, strokePaint)
 
                   // nub
                   fillPaint.color = fg
                   fillPaint.alpha = 100
-                  rect.set(bodyRight + nubGap, cy - dp(2.2f), bodyRight + nubGap + nubW, cy + dp(2.2f))
-                  c.drawRoundRect(rect, dp(1f), dp(1f), fillPaint)
+                  rect.set(26.2f, 4.05f, 28f, 8.45f)
+                  c.drawRoundRect(rect, 1f, 1f, fillPaint)
 
                   // level fill
-                  val inset = dp(2f)
-                  val innerW = bodyW - inset * 2
-                  val fillW = max(dp(3f), innerW * (level.coerceIn(0, 100) / 100f))
+                  val frac = level.coerceIn(0, 100) / 100f
+                  val fillW = max(3f, 21f * frac)
                   fillPaint.color = stateColor
                   fillPaint.alpha = 255
-                  rect.set(bodyLeft + inset, top + inset, bodyLeft + inset + fillW, bottom - inset)
-                  c.drawRoundRect(rect, dp(2.3f), dp(2.3f), fillPaint)
+                  rect.set(2f, 2f, 2f + fillW, 10.5f)
+                  c.drawRoundRect(rect, 2.3f, 2.3f, fillPaint)
 
                   // charging bolt
                   if (charging) {
-                      val bh = bodyH - dp(1f)
+                      val bh = 11.5f
                       val bw = bh * 0.62f
-                      val bx = bodyLeft + bodyW / 2f - bw / 2f
-                      val by = cy - bh / 2f
+                      val bx = 12.5f - bw / 2f
+                      val by = 6.25f - bh / 2f
                       bolt.reset()
                       bolt.moveTo(bx + bw * 0.62f, by)
                       bolt.lineTo(bx + bw * 0.05f, by + bh * 0.58f)
@@ -238,54 +215,7 @@ jobs:
                       c.drawPath(bolt, fillPaint)
                   }
 
-                  x = bodyLeft - dp(5f)
-
-                  // ---- Percentage ----
-                  if (showPercent) {
-                      val s = "${level}%"
-                      val w = textPaint.measureText(s)
-                      val baseline = cy - (textPaint.descent() + textPaint.ascent()) / 2f
-                      textPaint.color = fg
-                      c.drawText(s, x - w, baseline, textPaint)
-                      x -= w + dp(9f)
-                  } else {
-                      x -= dp(4f)
-                  }
-
-                  // ---- Wi-Fi ----
-                  if (wifiConnected) {
-                      val w = dp(21f)
-                      val px = x - w / 2f
-                      val py = cy + dp(6f)
-                      strokePaint.strokeWidth = dp(2.4f)
-                      strokePaint.color = fg
-                      val radii = floatArrayOf(dp(5f), dp(9f), dp(13f))
-                      for (i in 0..2) {
-                          strokePaint.alpha = if (i < wifiBars) 255 else 70
-                          val r = radii[i]
-                          rect.set(px - r, py - r, px + r, py + r)
-                          c.drawArc(rect, 225f, 90f, false, strokePaint)
-                      }
-                      fillPaint.color = fg
-                      fillPaint.alpha = 255
-                      c.drawCircle(px, py, dp(1.8f), fillPaint)
-                      x -= w + dp(7f)
-                  }
-
-                  // ---- Signal bars ----
-                  val barW = dp(3.2f)
-                  val barGap = dp(1.6f)
-                  val heights = floatArrayOf(dp(4.5f), dp(7f), dp(9.5f), dp(12f))
-                  val totalW = barW * 4 + barGap * 3
-                  val left = x - totalW
-                  val barBottom = cy + dp(6f)
-                  for (i in 0..3) {
-                      fillPaint.color = fg
-                      fillPaint.alpha = if (i < cellBars) 255 else 70
-                      val l = left + i * (barW + barGap)
-                      rect.set(l, barBottom - heights[i], l + barW, barBottom)
-                      c.drawRoundRect(rect, dp(1f), dp(1f), fillPaint)
-                  }
+                  c.restore()
               }
           }
           EOF_FILE
@@ -302,33 +232,21 @@ jobs:
           import android.content.Intent
           import android.content.IntentFilter
           import android.content.pm.ServiceInfo
+          import android.graphics.Color
           import android.graphics.PixelFormat
-          import android.net.ConnectivityManager
-          import android.net.NetworkCapabilities
-          import android.net.wifi.WifiManager
           import android.os.BatteryManager
           import android.os.Build
-          import android.os.Handler
           import android.os.IBinder
-          import android.os.Looper
           import android.os.PowerManager
-          import android.telephony.TelephonyManager
           import android.view.Gravity
           import android.view.WindowManager
           import androidx.core.app.ServiceCompat
+          import kotlin.math.ceil
 
           class OverlayService : Service() {
 
               private lateinit var wm: WindowManager
-              private var view: StatusBarView? = null
-              private val handler = Handler(Looper.getMainLooper())
-
-              private val poll = object : Runnable {
-                  override fun run() {
-                      updateConnectivity()
-                      handler.postDelayed(this, 3000)
-                  }
-              }
+              private var view: BatteryView? = null
 
               private val receiver = object : BroadcastReceiver() {
                   override fun onReceive(context: Context?, intent: Intent?) {
@@ -351,34 +269,44 @@ jobs:
 
               override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
                   startAsForeground()
+                  getSharedPreferences("prefs", MODE_PRIVATE).edit().putBoolean("running", true).apply()
                   rebuildView()
-                  handler.removeCallbacks(poll)
-                  handler.post(poll)
                   return START_STICKY
               }
 
               override fun onDestroy() {
-                  handler.removeCallbacks(poll)
+                  getSharedPreferences("prefs", MODE_PRIVATE).edit().putBoolean("running", false).apply()
                   try { unregisterReceiver(receiver) } catch (e: Exception) {}
                   removeView()
                   super.onDestroy()
               }
 
-              // ---------- overlay window ----------
-
               private fun rebuildView() {
                   removeView()
                   val prefs = getSharedPreferences("prefs", MODE_PRIVATE)
-                  val widthDp = prefs.getInt("width", 160)
-                  val light = prefs.getBoolean("light", false)
-                  val percent = prefs.getBoolean("percent", true)
-                  val density = resources.displayMetrics.density
+                  val scale = prefs.getInt("size", 100) / 100f
+                  val xDp = prefs.getInt("x", 16)
+                  val yDp = prefs.getInt("y", 0)
+                  val padDp = prefs.getInt("pad", 4)
+                  val dark = prefs.getBoolean("dark", false)
+                  val bg = when (prefs.getInt("bg", 0)) {
+                      1 -> Color.BLACK
+                      2 -> Color.WHITE
+                      3 -> 0xFF1C1C1E.toInt()
+                      else -> Color.TRANSPARENT
+                  }
+                  val d = resources.displayMetrics.density
 
-                  val v = StatusBarView(this, light, percent)
+                  val pad = padDp * d
+                  val w = ceil(BatteryView.UNITS_W * d * scale + 2 * pad).toInt()
+                  val h = ceil(BatteryView.UNITS_H * d * scale + 2 * pad).toInt()
+                  val sbh = statusBarHeight()
+
+                  val v = BatteryView(this, dark, scale, bg)
 
                   val lp = WindowManager.LayoutParams(
-                      (widthDp * density).toInt(),
-                      statusBarHeight(),
+                      w,
+                      h,
                       WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                       WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                               WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
@@ -388,6 +316,8 @@ jobs:
                       PixelFormat.TRANSLUCENT
                   ).apply {
                       gravity = Gravity.TOP or Gravity.END
+                      x = (xDp * d - pad).toInt()
+                      y = ((sbh - h) / 2f + yDp * d).toInt()
                       if (Build.VERSION.SDK_INT >= 28) {
                           layoutInDisplayCutoutMode =
                               WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
@@ -397,7 +327,6 @@ jobs:
                   wm.addView(v, lp)
                   view = v
                   updateBattery()
-                  updateConnectivity()
               }
 
               private fun removeView() {
@@ -413,8 +342,6 @@ jobs:
                   else (28 * resources.displayMetrics.density).toInt()
               }
 
-              // ---------- battery ----------
-
               private fun updateBattery() {
                   val v = view ?: return
                   val i = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return
@@ -429,53 +356,14 @@ jobs:
                   v.invalidate()
               }
 
-              // ---------- Wi-Fi + cell ----------
-
-              @Suppress("DEPRECATION")
-              private fun updateConnectivity() {
-                  val v = view ?: return
-
-                  try {
-                      val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
-                      val caps = cm.getNetworkCapabilities(cm.activeNetwork)
-                      val onWifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
-                      v.wifiConnected = onWifi
-                      if (onWifi) {
-                          val wifi = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
-                          val rssi = wifi.connectionInfo.rssi
-                          v.wifiBars = when {
-                              rssi > -60 -> 3
-                              rssi > -70 -> 2
-                              rssi > -80 -> 1
-                              else -> 0
-                          }
-                      }
-                  } catch (e: Exception) {
-                      v.wifiConnected = false
-                  }
-
-                  try {
-                      val tm = getSystemService(TELEPHONY_SERVICE) as TelephonyManager
-                      v.cellBars = if (Build.VERSION.SDK_INT >= 28) {
-                          tm.signalStrength?.level ?: 4
-                      } else 4
-                  } catch (e: Exception) {
-                      v.cellBars = 4
-                  }
-
-                  v.invalidate()
-              }
-
-              // ---------- foreground notification ----------
-
               private fun startAsForeground() {
                   val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
                   nm.createNotificationChannel(
-                      NotificationChannel("overlay", "Status bar overlay", NotificationManager.IMPORTANCE_MIN)
+                      NotificationChannel("overlay", "Battery overlay", NotificationManager.IMPORTANCE_MIN)
                   )
                   val n = Notification.Builder(this, "overlay")
                       .setSmallIcon(android.R.drawable.stat_notify_more)
-                      .setContentTitle("iOS status bar overlay running")
+                      .setContentTitle("iOS battery icon running")
                       .build()
 
                   ServiceCompat.startForeground(
@@ -496,9 +384,13 @@ jobs:
           import android.os.Build
           import android.os.Bundle
           import android.provider.Settings
+          import android.view.View
           import android.widget.Button
           import android.widget.CheckBox
           import android.widget.LinearLayout
+          import android.widget.RadioButton
+          import android.widget.RadioGroup
+          import android.widget.ScrollView
           import android.widget.SeekBar
           import android.widget.TextView
           import android.widget.Toast
@@ -513,21 +405,49 @@ jobs:
 
                   val root = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
-                      setPadding(px(24), px(48), px(24), px(24))
+                      setPadding(px(24), px(48), px(24), px(32))
                   }
 
-                  fun button(label: String, onClick: () -> Unit) = Button(this).apply {
-                      text = label
-                      setOnClickListener { onClick() }
-                      root.addView(this)
+                  fun applyLive() {
+                      if (prefs.getBoolean("running", false) && Settings.canDrawOverlays(this)) {
+                          startForegroundService(Intent(this, OverlayService::class.java))
+                      }
+                  }
+
+                  fun button(label: String, onClick: () -> Unit) {
+                      root.addView(Button(this).apply {
+                          text = label
+                          setOnClickListener { onClick() }
+                      })
+                  }
+
+                  fun addSeek(title: String, key: String, lo: Int, hi: Int, def: Int, unit: String) {
+                      val label = TextView(this).apply { setPadding(0, px(14), 0, 0) }
+                      val bar = SeekBar(this).apply {
+                          max = hi - lo
+                          progress = prefs.getInt(key, def) - lo
+                      }
+                      fun upd() { label.text = title + ": " + (bar.progress + lo) + unit }
+                      upd()
+                      bar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                          override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                              prefs.edit().putInt(key, p + lo).apply()
+                              upd()
+                          }
+                          override fun onStartTrackingTouch(s: SeekBar?) {}
+                          override fun onStopTrackingTouch(s: SeekBar?) { applyLive() }
+                      })
+                      root.addView(label)
+                      root.addView(bar)
                   }
 
                   root.addView(TextView(this).apply {
-                      text = "iOS Status Bar"
+                      text = "iOS Battery"
                       textSize = 26f
                   })
                   root.addView(TextView(this).apply {
-                      text = "Draws iOS-style battery and Wi-Fi icons over your system status bar."
+                      text = "Draws an iOS-style battery icon over your status bar. " +
+                              "Changes apply live once it is started."
                       setPadding(0, px(8), 0, px(16))
                   })
 
@@ -535,51 +455,16 @@ jobs:
                       startActivity(
                           Intent(
                               Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                              Uri.parse("package:$packageName")
+                              Uri.parse("package:" + packageName)
                           )
                       )
                   }
-
-                  button("2. Allow notifications + phone state") {
-                      val perms = mutableListOf(Manifest.permission.READ_PHONE_STATE)
-                      if (Build.VERSION.SDK_INT >= 33) perms.add(Manifest.permission.POST_NOTIFICATIONS)
-                      requestPermissions(perms.toTypedArray(), 1)
-                  }
-
-                  // Width slider
-                  val widthLabel = TextView(this)
-                  val bar = SeekBar(this).apply {
-                      max = 200 // 80..280 dp
-                      progress = prefs.getInt("width", 160) - 80
-                  }
-                  fun updateLabel() {
-                      widthLabel.text = "Overlay width: ${bar.progress + 80} dp (widen until Samsung icons are fully hidden)"
-                  }
-                  updateLabel()
-                  bar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                      override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
-                          prefs.edit().putInt("width", p + 80).apply()
-                          updateLabel()
+                  button("2. Allow notifications") {
+                      if (Build.VERSION.SDK_INT >= 33) {
+                          requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
                       }
-                      override fun onStartTrackingTouch(s: SeekBar?) {}
-                      override fun onStopTrackingTouch(s: SeekBar?) {}
-                  })
-                  widthLabel.setPadding(0, px(16), 0, 0)
-                 root.addView(widthLabel)
-                  root.addView(bar)
-
-                  root.addView(CheckBox(this).apply {
-                      text = "Show battery percentage"
-                      isChecked = prefs.getBoolean("percent", true)
-                      setOnCheckedChangeListener { _, c -> prefs.edit().putBoolean("percent", c).apply() }
-                  })
-                  root.addView(CheckBox(this).apply {
-                      text = "Light mode (white bar, dark icons)"
-                      isChecked = prefs.getBoolean("light", false)
-                      setOnCheckedChangeListener { _, c -> prefs.edit().putBoolean("light", c).apply() }
-                  })
-
-                  button("3. Start / apply changes") {
+                  }
+                  button("3. Start") {
                       if (!Settings.canDrawOverlays(this)) {
                           Toast.makeText(this, "Grant overlay permission first", Toast.LENGTH_SHORT).show()
                       } else {
@@ -590,7 +475,48 @@ jobs:
                       stopService(Intent(this, OverlayService::class.java))
                   }
 
-                  setContentView(root)
+                  addSeek("Battery size", "size", 50, 300, 100, "%")
+                  addSeek("Left / right (distance from right edge)", "x", 0, 200, 16, " dp")
+                  addSeek("Up / down", "y", -40, 40, 0, "")
+                  addSeek("Cover margin around battery", "pad", 0, 20, 4, " dp")
+
+                  root.addView(TextView(this).apply {
+                      text = "Background behind the battery"
+                      setPadding(0, px(18), 0, 0)
+                  })
+                  val names = arrayOf("Transparent", "Black", "White", "Dark gray")
+                  val group = RadioGroup(this)
+                  val ids = ArrayList<Int>()
+                  for (n in names) {
+                      val rb = RadioButton(this)
+                      rb.text = n
+                      rb.id = View.generateViewId()
+                      ids.add(rb.id)
+                      group.addView(rb)
+                  }
+                  group.check(ids[prefs.getInt("bg", 0).coerceIn(0, 3)])
+                  group.setOnCheckedChangeListener { _, checkedId ->
+                      prefs.edit().putInt("bg", ids.indexOf(checkedId)).apply()
+                      applyLive()
+                  }
+                  root.addView(group)
+                  root.addView(TextView(this).apply {
+                      text = "Transparent shows whatever is underneath, including the original " +
+                              "battery. To hide the original, pick a colour that matches your " +
+                              "status bar and raise the cover margin just enough."
+                      textSize = 12f
+                  })
+
+                  root.addView(CheckBox(this).apply {
+                      text = "Dark icon (for light backgrounds)"
+                      isChecked = prefs.getBoolean("dark", false)
+                      setOnCheckedChangeListener { _, c ->
+                          prefs.edit().putBoolean("dark", c).apply()
+                          applyLive()
+                      }
+                  })
+
+                  setContentView(ScrollView(this).apply { addView(root) })
               }
           }
           EOF_FILE
