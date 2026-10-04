@@ -1,0 +1,664 @@
+name: Build Clock APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Create app files
+        run: |
+          mkdir -p clock/app
+          cat > clock/app/build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.glassclock"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.example.glassclock"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 2
+                  versionName = "2.0"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+          }
+          EOF_FILE
+          mkdir -p clock/app/src/main
+          cat > clock/app/src/main/AndroidManifest.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+              <application
+                  android:allowBackup="true"
+                  android:label="Dylan's IOS Clock"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <receiver
+                      android:name=".ClockWidget"
+                      android:exported="true"
+                      android:label="Dylan's IOS Clock">
+                      <intent-filter>
+                          <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.appwidget.provider"
+                          android:resource="@xml/clock_widget_info" />
+                  </receiver>
+
+                  <receiver
+                      android:name=".BootReceiver"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED" />
+                      </intent-filter>
+                  </receiver>
+
+                  <service
+                      android:name=".ClockService"
+                      android:exported="false"
+                      android:foregroundServiceType="specialUse">
+                      <property
+                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="Redraws the clock widget every minute" />
+                  </service>
+              </application>
+          </manifest>
+          EOF_FILE
+          mkdir -p clock/app/src/main/java/com/example/glassclock
+          cat > clock/app/src/main/java/com/example/glassclock/BootReceiver.kt <<'EOF_FILE'
+          package com.example.glassclock
+
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+
+          class BootReceiver : BroadcastReceiver() {
+              override fun onReceive(context: Context, intent: Intent) {
+                  WidgetUpdater.startService(context)
+              }
+          }
+          EOF_FILE
+          mkdir -p clock/app/src/main/java/com/example/glassclock
+          cat > clock/app/src/main/java/com/example/glassclock/ClockService.kt <<'EOF_FILE'
+          package com.example.glassclock
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.content.pm.ServiceInfo
+          import android.os.Build
+          import android.os.IBinder
+          import androidx.core.app.ServiceCompat
+
+          class ClockService : Service() {
+
+              private val receiver = object : BroadcastReceiver() {
+                  override fun onReceive(context: Context?, intent: Intent?) {
+                      WidgetUpdater.refreshAll(this@ClockService)
+                  }
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  val filter = IntentFilter().apply {
+                      addAction(Intent.ACTION_TIME_TICK)
+                      addAction(Intent.ACTION_TIME_CHANGED)
+                      addAction(Intent.ACTION_TIMEZONE_CHANGED)
+                      addAction(Intent.ACTION_DATE_CHANGED)
+                      addAction(Intent.ACTION_SCREEN_ON)
+                  }
+                  registerReceiver(receiver, filter)
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  startAsForeground()
+                  WidgetUpdater.refreshAll(this)
+                  return START_STICKY
+              }
+
+              override fun onDestroy() {
+                  try { unregisterReceiver(receiver) } catch (e: Exception) {}
+                  super.onDestroy()
+              }
+
+              private fun startAsForeground() {
+                  val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                  nm.createNotificationChannel(
+                      NotificationChannel("clock", "Clock updates", NotificationManager.IMPORTANCE_MIN)
+                  )
+                  val n = Notification.Builder(this, "clock")
+                      .setSmallIcon(android.R.drawable.stat_notify_more)
+                      .setContentTitle("Dylan's IOS Clock running")
+                      .build()
+                  ServiceCompat.startForeground(
+                      this, 1, n,
+                      if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
+                  )
+              }
+          }
+          EOF_FILE
+          mkdir -p clock/app/src/main/java/com/example/glassclock
+          cat > clock/app/src/main/java/com/example/glassclock/ClockWidget.kt <<'EOF_FILE'
+          package com.example.glassclock
+
+          import android.app.PendingIntent
+          import android.appwidget.AppWidgetManager
+          import android.appwidget.AppWidgetProvider
+          import android.content.ComponentName
+          import android.content.Context
+          import android.content.Intent
+          import android.content.res.Configuration
+          import android.os.Bundle
+          import android.provider.AlarmClock
+          import android.widget.RemoteViews
+
+          object WidgetUpdater {
+
+              fun refreshAll(ctx: Context) {
+                  val mgr = AppWidgetManager.getInstance(ctx)
+                  val ids = mgr.getAppWidgetIds(ComponentName(ctx, ClockWidget::class.java))
+                  for (id in ids) refresh(ctx, mgr, id)
+              }
+
+              fun refresh(ctx: Context, mgr: AppWidgetManager, id: Int) {
+                  val opts = mgr.getAppWidgetOptions(id)
+                  val portrait = ctx.resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
+                  val wDp = if (portrait) opts.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, 250)
+                  else opts.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH, 250)
+                  val hDp = if (portrait) opts.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT, 250)
+                  else opts.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT, 250)
+
+                  var scale = minOf(ctx.resources.displayMetrics.density, 2f)
+                  var w = (wDp * scale).toInt().coerceAtLeast(100)
+                  var h = (hDp * scale).toInt().coerceAtLeast(100)
+                  // keep the bitmap small enough for a widget
+                  while (w.toLong() * h * 4 > 5_000_000L) {
+                      scale *= 0.9f
+                      w = (wDp * scale).toInt().coerceAtLeast(100)
+                      h = (hDp * scale).toInt().coerceAtLeast(100)
+                  }
+
+                  val bmp = GlassRenderer.render(ctx, w, h)
+                  val views = RemoteViews(ctx.packageName, R.layout.widget_clock)
+                  views.setImageViewBitmap(R.id.img, bmp)
+
+                  val intent = Intent(AlarmClock.ACTION_SHOW_ALARMS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                  val pi = PendingIntent.getActivity(
+                      ctx, 0, intent,
+                      PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                  )
+                  views.setOnClickPendingIntent(R.id.root, pi)
+                  mgr.updateAppWidget(id, views)
+              }
+
+              fun startService(ctx: Context) {
+                  try {
+                      ctx.startForegroundService(Intent(ctx, ClockService::class.java))
+                  } catch (e: Exception) {
+                      // Not allowed from the background; open the app and press Start instead.
+                  }
+              }
+          }
+
+          class ClockWidget : AppWidgetProvider() {
+
+              override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) {
+                  for (id in ids) WidgetUpdater.refresh(context, manager, id)
+                  WidgetUpdater.startService(context)
+              }
+
+              override fun onAppWidgetOptionsChanged(
+                  context: Context, manager: AppWidgetManager, id: Int, newOptions: Bundle
+              ) {
+                  WidgetUpdater.refresh(context, manager, id)
+              }
+
+              override fun onEnabled(context: Context) {
+                  WidgetUpdater.startService(context)
+              }
+          }
+          EOF_FILE
+          mkdir -p clock/app/src/main/java/com/example/glassclock
+          cat > clock/app/src/main/java/com/example/glassclock/GlassRenderer.kt <<'EOF_FILE'
+          package com.example.glassclock
+
+          import android.content.Context
+          import android.graphics.Bitmap
+          import android.graphics.BlurMaskFilter
+          import android.graphics.Canvas
+          import android.graphics.LinearGradient
+          import android.graphics.Matrix
+          import android.graphics.Paint
+          import android.graphics.Path
+          import android.graphics.RectF
+          import android.graphics.Shader
+          import android.graphics.Typeface
+          import android.text.format.DateFormat
+          import java.text.SimpleDateFormat
+          import java.util.Calendar
+          import java.util.Locale
+
+          /**
+           * Draws tall, condensed, rounded "glass" digits that stretch to fill the
+           * widget. Digits are vector shapes (not a font), so they can be any height.
+           */
+          object GlassRenderer {
+
+              fun render(ctx: Context, w: Int, h: Int): Bitmap {
+                  val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                  val c = Canvas(bmp)
+
+                  val now = Calendar.getInstance()
+                  val is24 = DateFormat.is24HourFormat(ctx)
+                  val hr = if (is24) {
+                      now.get(Calendar.HOUR_OF_DAY)
+                  } else {
+                      val x = now.get(Calendar.HOUR)
+                      if (x == 0) 12 else x
+                  }
+                  val mn = now.get(Calendar.MINUTE)
+                  val hourText = if (is24) String.format("%02d", hr) else hr.toString()
+                  val timeText = hourText + ":" + String.format("%02d", mn)
+                  val dateText = SimpleDateFormat("EEE d MMM", Locale.getDefault()).format(now.time)
+
+                  val pad = minOf(w, h) * 0.05f
+
+                  // Date line
+                  val datePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                      typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                      color = 0xEBFFFFFF.toInt()
+                      textAlign = Paint.Align.CENTER
+                      textSize = minOf(h * 0.075f, w * 0.085f)
+                  }
+                  val dateBaseline = pad + datePaint.textSize * 0.9f
+                  c.drawText(dateText, w / 2f, dateBaseline, datePaint)
+
+                  // Digit area
+                  val top = dateBaseline + datePaint.textSize * 0.55f
+                  val bottom = h - pad
+                  val ch = bottom - top
+
+                  val digits = timeText.length - 1
+                  val gapF = 0.12f
+                  val colonF = 0.40f
+                  val cw = minOf((w - 2 * pad) / (digits + colonF + digits * gapF), ch * 0.30f)
+                  val gap = cw * gapF
+                  val total = digits * cw + colonF * cw + digits * gap
+                  var x = (w - total) / 2f
+                  val s = cw * 0.30f   // stroke thickness
+
+                  val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                      style = Paint.Style.STROKE
+                      strokeWidth = s
+                      strokeCap = Paint.Cap.ROUND
+                      strokeJoin = Paint.Join.ROUND
+                  }
+
+                  for (chr in timeText) {
+                      if (chr == ':') {
+                          val colonW = cw * colonF
+                          val cx = x + colonW / 2f
+                          val dotR = s * 0.55f
+                          for (fy in floatArrayOf(0.30f, 0.70f)) {
+                              val p = Path()
+                              p.addCircle(cx, top + ch * fy, dotR, Path.Direction.CW)
+                              drawGlass(c, p, s, top, bottom)
+                          }
+                          x += colonW + gap
+                      } else {
+                          val path = digitPath(chr - '0', x, top, cw, ch, s)
+                          val outline = Path()
+                          strokePaint.getFillPath(path, outline)
+                          drawGlass(c, outline, s, top, bottom)
+                          x += cw + gap
+                      }
+                  }
+                  return bmp
+              }
+
+              private fun drawGlass(c: Canvas, outline: Path, s: Float, top: Float, bottom: Float) {
+                  // soft shadow, only outside the glyph so the glass stays clear
+                  c.save()
+                  c.clipOutPath(outline)
+                  val shadow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                      color = 0x40000000
+                      maskFilter = BlurMaskFilter(s * 0.25f, BlurMaskFilter.Blur.NORMAL)
+                  }
+                  c.translate(0f, s * 0.10f)
+                  c.drawPath(outline, shadow)
+                  c.restore()
+
+                  // translucent body, brighter at the top
+                  val body = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                      style = Paint.Style.FILL
+                      shader = LinearGradient(
+                          0f, top, 0f, bottom,
+                          0xB8FFFFFF.toInt(), 0x80E4DCFF.toInt(),
+                          Shader.TileMode.CLAMP
+                      )
+                  }
+                  c.drawPath(outline, body)
+
+                  // soft inner glow along the edges
+                  c.save()
+                  c.clipPath(outline)
+                  val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                      style = Paint.Style.STROKE
+                      strokeWidth = s * 0.40f
+                      color = 0xB3FFFFFF.toInt()
+                      maskFilter = BlurMaskFilter(s * 0.10f, BlurMaskFilter.Blur.NORMAL)
+                  }
+                  c.drawPath(outline, glow)
+                  c.restore()
+
+                  // crisp rim
+                  val rim = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                      style = Paint.Style.STROKE
+                      strokeWidth = maxOf(1.5f, s * 0.035f)
+                      color = 0xD9FFFFFF.toInt()
+                  }
+                  c.drawPath(outline, rim)
+              }
+
+              /** Centre-line of a digit inside cell (L, T, cw x ch), for a stroke of width s. */
+              private fun digitPath(d: Int, L: Float, T: Float, cw: Float, ch: Float, s: Float): Path {
+                  val x0 = L + s / 2f
+                  val x1 = L + cw - s / 2f
+                  val y0 = T + s / 2f
+                  val y1 = T + ch - s / 2f
+                  val xm = (x0 + x1) / 2f
+                  val ym = (y0 + y1) / 2f
+                  val r = (x1 - x0) / 2f
+                  val p = Path()
+
+                  when (d) {
+                      0 -> p.addRoundRect(RectF(x0, y0, x1, y1), r, r, Path.Direction.CW)
+
+                      1 -> {
+                          val sx = xm + r * 0.35f
+                          p.moveTo(x0, y0 + ch * 0.10f)
+                          p.lineTo(sx, y0)
+                          p.lineTo(sx, y1)
+                      }
+
+                      2 -> {
+                          val yb = y0 + r
+                          p.moveTo(x0, yb)
+                          p.arcTo(RectF(x0, y0, x1, y0 + 2 * r), 180f, 180f)
+                          p.cubicTo(x1, yb + (y1 - yb) * 0.55f, x0, yb + (y1 - yb) * 0.35f, x0, y1)
+                          p.lineTo(x1, y1)
+                      }
+
+                      3 -> {
+                          p.moveTo(x0, y0 + r)
+                          p.arcTo(RectF(x0, y0, x1, y0 + 2 * r), 180f, 180f)
+                          p.lineTo(x1, ym - r)
+                          p.quadTo(x1, ym, x1 - r, ym)
+                          p.lineTo(xm - r * 0.2f, ym)
+                          p.moveTo(x1 - r, ym)
+                          p.quadTo(x1, ym, x1, ym + r)
+                          p.lineTo(x1, y1 - r)
+                          p.arcTo(RectF(x0, y1 - 2 * r, x1, y1), 0f, 180f)
+                      }
+
+                      4 -> {
+                          val sx = x0 + (x1 - x0) * 0.72f
+                          val yb = y0 + (y1 - y0) * 0.62f
+                          p.moveTo(sx, y1)
+                          p.lineTo(sx, y0)
+                          p.lineTo(x0, yb)
+                          p.lineTo(x1, yb)
+                      }
+
+                      5 -> {
+                          p.moveTo(x1, y0)
+                          p.lineTo(x0, y0)
+                          p.lineTo(x0, ym)
+                          p.lineTo(x1 - r, ym)
+                          p.quadTo(x1, ym, x1, ym + r)
+                          p.lineTo(x1, y1 - r)
+                          p.arcTo(RectF(x0, y1 - 2 * r, x1, y1), 0f, 180f)
+                      }
+
+                      6 -> {
+                          val yTop = y0 + (y1 - y0) * 0.42f
+                          p.addRoundRect(RectF(x0, yTop, x1, y1), r, r, Path.Direction.CW)
+                          p.moveTo(x0, yTop + r)
+                          p.lineTo(x0, y0 + r)
+                          p.arcTo(RectF(x0, y0, x1, y0 + 2 * r), 180f, 100f)
+                      }
+
+                      7 -> {
+                          p.moveTo(x0, y0)
+                          p.lineTo(x1, y0)
+                          p.lineTo(x0 + (x1 - x0) * 0.30f, y1)
+                      }
+
+                      8 -> {
+                          val inset = r * 0.14f
+                          val tw = (x1 - inset) - (x0 + inset)
+                          p.addRoundRect(
+                              RectF(x0 + inset, y0, x1 - inset, y0 + (y1 - y0) * 0.50f),
+                              tw / 2f, tw / 2f, Path.Direction.CW
+                          )
+                          p.addRoundRect(
+                              RectF(x0, y0 + (y1 - y0) * 0.48f, x1, y1),
+                              r, r, Path.Direction.CW
+                          )
+                      }
+
+                      else -> {
+                          // 9 = a 6 turned upside down
+                          val six = digitPath(6, L, T, cw, ch, s)
+                          val m = Matrix()
+                          m.postRotate(180f, L + cw / 2f, T + ch / 2f)
+                          six.transform(m)
+                          return six
+                      }
+                  }
+                  return p
+              }
+          }
+          EOF_FILE
+          mkdir -p clock/app/src/main/java/com/example/glassclock
+          cat > clock/app/src/main/java/com/example/glassclock/MainActivity.kt <<'EOF_FILE'
+          package com.example.glassclock
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Intent
+          import android.os.Build
+          import android.os.Bundle
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+
+          class MainActivity : Activity() {
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val d = resources.displayMetrics.density
+                  val pad = (24 * d).toInt()
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(pad, pad * 2, pad, pad)
+                  }
+
+                  root.addView(TextView(this).apply {
+                      text = "Dylan's IOS Clock"
+                      textSize = 26f
+                  })
+                  root.addView(TextView(this).apply {
+                      text = "1. Allow notifications, then tap Start. This keeps the clock widget " +
+                              "updating every minute.\n\n" +
+                              "2. Home screen: long-press the home screen, tap Widgets, and add " +
+                              "Dylan's IOS Clock. Drag its edges to resize; the digits stretch to fit.\n\n" +
+                              "3. Lock screen: Good Lock > LockStar > App widgets, then pick " +
+                              "Dylan's IOS Clock."
+                      setPadding(0, (16 * d).toInt(), 0, (16 * d).toInt())
+                  })
+
+                  root.addView(Button(this).apply {
+                      text = "Allow notifications"
+                      setOnClickListener {
+                          if (Build.VERSION.SDK_INT >= 33) {
+                              requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+                          }
+                      }
+                  })
+                  root.addView(Button(this).apply {
+                      text = "Start"
+                      setOnClickListener {
+                          startForegroundService(Intent(this@MainActivity, ClockService::class.java))
+                      }
+                  })
+                  root.addView(Button(this).apply {
+                      text = "Stop"
+                      setOnClickListener {
+                          stopService(Intent(this@MainActivity, ClockService::class.java))
+                      }
+                  })
+
+                  setContentView(root)
+              }
+          }
+          EOF_FILE
+          mkdir -p clock/app/src/main/res/layout
+          cat > clock/app/src/main/res/layout/widget_clock.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:id="@+id/root"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent">
+
+              <ImageView
+                  android:id="@+id/img"
+                  android:layout_width="match_parent"
+                  android:layout_height="match_parent"
+                  android:contentDescription="Clock"
+                  android:scaleType="fitCenter" />
+          </FrameLayout>
+          EOF_FILE
+          mkdir -p clock/app/src/main/res/layout
+          cat > clock/app/src/main/res/layout/widget_preview.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:background="#59000000">
+
+              <TextView
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:layout_gravity="center"
+                  android:fontFamily="sans-serif-light"
+                  android:text="13:00"
+                  android:textColor="#CCFFFFFF"
+                  android:textSize="56sp" />
+          </FrameLayout>
+          EOF_FILE
+          mkdir -p clock/app/src/main/res/xml
+          cat > clock/app/src/main/res/xml/clock_widget_info.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+              android:minWidth="110dp"
+              android:minHeight="110dp"
+              android:minResizeWidth="110dp"
+              android:minResizeHeight="110dp"
+              android:targetCellWidth="4"
+              android:targetCellHeight="4"
+              android:initialLayout="@layout/widget_clock"
+              android:previewLayout="@layout/widget_preview"
+              android:resizeMode="horizontal|vertical"
+              android:updatePeriodMillis="0"
+              android:widgetCategory="home_screen|keyguard" />
+          EOF_FILE
+          mkdir -p clock
+          cat > clock/build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_FILE
+          mkdir -p clock
+          cat > clock/gradle.properties <<'EOF_FILE'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF_FILE
+          mkdir -p clock
+          cat > clock/settings.gradle.kts <<'EOF_FILE'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "GlassClock"
+          include(":app")
+          EOF_FILE
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - run: gradle assembleDebug
+        working-directory: clock
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GlassClock-apk
+          path: clock/app/build/outputs/apk/debug/app-debug.apk
