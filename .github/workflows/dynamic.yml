@@ -1,0 +1,575 @@
+name: Build Charge APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Create app files
+        run: |
+          mkdir -p charge/app
+          cat > charge/app/build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.chargepill"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.example.chargepill"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+          }
+          EOF_FILE
+          mkdir -p charge/app/src/main
+          cat > charge/app/src/main/AndroidManifest.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+              <uses-permission android:name="android.permission.VIBRATE" />
+
+              <application
+                  android:allowBackup="true"
+                  android:label="iOS Charging"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <receiver
+                      android:name=".BootReceiver"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED" />
+                      </intent-filter>
+                  </receiver>
+
+                  <service
+                      android:name=".ChargeService"
+                      android:exported="false"
+                      android:foregroundServiceType="specialUse">
+                      <property
+                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="Shows a charging animation when the phone is plugged in" />
+                  </service>
+              </application>
+          </manifest>
+          EOF_FILE
+          mkdir -p charge/app/src/main/java/com/example/chargepill
+          cat > charge/app/src/main/java/com/example/chargepill/BootReceiver.kt <<'EOF_FILE'
+          package com.example.chargepill
+
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+
+          class BootReceiver : BroadcastReceiver() {
+              override fun onReceive(context: Context, intent: Intent) {
+                  try {
+                      context.startForegroundService(Intent(context, ChargeService::class.java))
+                  } catch (e: Exception) {
+                      // Not allowed right now; open the app and press Start.
+                  }
+              }
+          }
+          EOF_FILE
+          mkdir -p charge/app/src/main/java/com/example/chargepill
+          cat > charge/app/src/main/java/com/example/chargepill/ChargePillView.kt <<'EOF_FILE'
+          package com.example.chargepill
+
+          import android.content.Context
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.graphics.RectF
+          import android.graphics.Typeface
+          import android.view.View
+          import kotlin.math.max
+
+          /** Black pill with "Charging" on the left, green percentage + battery on the right. */
+          class ChargePillView(context: Context) : View(context) {
+
+              var level = 100
+
+              private val green = 0xFF30D158.toInt()
+              private val mint = 0xFF6BE585.toInt()
+
+              private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  color = Color.BLACK
+                  style = Paint.Style.FILL
+              }
+              private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  color = 0xFF2C2C2E.toInt()
+                  style = Paint.Style.STROKE
+              }
+              private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  color = Color.WHITE
+                  typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+              }
+              private val pctPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  color = mint
+                  typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                  textAlign = Paint.Align.RIGHT
+              }
+              private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+              private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+              private val rect = RectF()
+
+              override fun onDraw(c: Canvas) {
+                  val w = width.toFloat()
+                  val h = height.toFloat()
+                  val u = h / 36f          // everything is designed for a 36-unit-tall pill
+                  val cy = h / 2f
+
+                  // pill
+                  val b = max(1f, u)
+                  borderPaint.strokeWidth = b
+                  rect.set(b / 2f, b / 2f, w - b / 2f, h - b / 2f)
+                  c.drawRoundRect(rect, h / 2f, h / 2f, bgPaint)
+                  c.drawRoundRect(rect, h / 2f, h / 2f, borderPaint)
+
+                  // "Charging"
+                  labelPaint.textSize = 15f * u
+                  val baseline = cy - (labelPaint.descent() + labelPaint.ascent()) / 2f
+                  c.drawText("Charging", h * 0.55f, baseline, labelPaint)
+
+                  // battery icon
+                  val right = w - h * 0.55f
+                  val nubW = 1.8f * u
+                  val nubGap = 1.2f * u
+                  val bodyW = 25f * u
+                  val bodyH = 12.5f * u
+                  val bodyRight = right - nubW - nubGap
+                  val bodyLeft = bodyRight - bodyW
+                  val top = cy - bodyH / 2f
+                  val bottom = cy + bodyH / 2f
+
+                  strokePaint.strokeWidth = 1.1f * u
+                  strokePaint.color = Color.WHITE
+                  strokePaint.alpha = 90
+                  val half = strokePaint.strokeWidth / 2f
+                  rect.set(bodyLeft + half, top + half, bodyRight - half, bottom - half)
+                  c.drawRoundRect(rect, 4f * u, 4f * u, strokePaint)
+
+                  fillPaint.color = Color.WHITE
+                  fillPaint.alpha = 90
+                  rect.set(bodyRight + nubGap, cy - 2.2f * u, bodyRight + nubGap + nubW, cy + 2.2f * u)
+                  c.drawRoundRect(rect, u, u, fillPaint)
+
+                  val frac = level.coerceIn(0, 100) / 100f
+                  fillPaint.color = green
+                  fillPaint.alpha = 255
+                  rect.set(
+                      bodyLeft + 2f * u, top + 2f * u,
+                      bodyLeft + 2f * u + max(3f * u, 21f * u * frac), bottom - 2f * u
+                  )
+                  c.drawRoundRect(rect, 2.3f * u, 2.3f * u, fillPaint)
+
+                  // percentage
+                  pctPaint.textSize = 15f * u
+                  c.drawText("$level%", bodyLeft - 7f * u, baseline, pctPaint)
+              }
+          }
+          EOF_FILE
+          mkdir -p charge/app/src/main/java/com/example/chargepill
+          cat > charge/app/src/main/java/com/example/chargepill/ChargeService.kt <<'EOF_FILE'
+          package com.example.chargepill
+
+          import android.animation.Animator
+          import android.animation.AnimatorListenerAdapter
+          import android.animation.TimeInterpolator
+          import android.animation.ValueAnimator
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.content.pm.ServiceInfo
+          import android.graphics.PixelFormat
+          import android.graphics.RenderEffect
+          import android.graphics.Shader
+          import android.os.BatteryManager
+          import android.os.Build
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import android.os.VibrationEffect
+          import android.os.Vibrator
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.view.WindowManager
+          import android.view.animation.AccelerateInterpolator
+          import android.view.animation.OvershootInterpolator
+          import androidx.core.app.ServiceCompat
+
+          class ChargeService : Service() {
+
+              companion object {
+                  const val ACTION_TEST = "com.example.chargepill.TEST"
+              }
+
+              private lateinit var wm: WindowManager
+              private val handler = Handler(Looper.getMainLooper())
+              private var pill: ChargePillView? = null
+              private var animator: ValueAnimator? = null
+              private val hideRunnable = Runnable { hidePill() }
+
+              private val receiver = object : BroadcastReceiver() {
+                  override fun onReceive(context: Context?, intent: Intent?) {
+                      showPill()
+                  }
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                  registerReceiver(receiver, IntentFilter(Intent.ACTION_POWER_CONNECTED))
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  startAsForeground()
+                  if (intent?.action == ACTION_TEST) showPill()
+                  return START_STICKY
+              }
+
+              override fun onDestroy() {
+                  try { unregisterReceiver(receiver) } catch (e: Exception) {}
+                  removePill()
+                  super.onDestroy()
+              }
+
+              // ---------- pill window + animation ----------
+
+              private fun showPill() {
+                  if (!Settings.canDrawOverlays(this)) return
+                  removePill()
+
+                  val prefs = getSharedPreferences("prefs", MODE_PRIVATE)
+                  val d = resources.displayMetrics.density
+                  val w = (prefs.getInt("w", 230) * d).toInt()
+                  val h = (prefs.getInt("h", 36) * d).toInt()
+                  val top = (prefs.getInt("top", 6) * d).toInt()
+                  val holdMs = prefs.getInt("hold", 3) * 1000L
+
+                  val v = ChargePillView(this)
+                  v.level = batteryLevel()
+                  applyProgress(v, 0f)
+
+                  val lp = WindowManager.LayoutParams(
+                      w,
+                      h,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                              WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                              WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                              WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                              WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                              WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                      PixelFormat.TRANSLUCENT
+                  ).apply {
+                      gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                      y = top
+                      if (Build.VERSION.SDK_INT >= 28) {
+                          layoutInDisplayCutoutMode =
+                              WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                      }
+                  }
+
+                  wm.addView(v, lp)
+                  pill = v
+
+                  if (prefs.getBoolean("vibrate", true)) vibrate()
+
+                  play(v, 0f, 1f, 450L, OvershootInterpolator(1.1f), null)
+                  handler.postDelayed(hideRunnable, holdMs + 450L)
+              }
+
+              private fun hidePill() {
+                  val v = pill ?: return
+                  play(v, 1f, 0f, 300L, AccelerateInterpolator()) {
+                      if (pill === v) removePill()
+                  }
+              }
+
+              private fun removePill() {
+                  handler.removeCallbacks(hideRunnable)
+                  val v = pill
+                  pill = null
+                  animator?.cancel()
+                  animator = null
+                  if (v != null) {
+                      try { wm.removeView(v) } catch (e: Exception) {}
+                  }
+              }
+
+              private fun play(
+                  v: ChargePillView, from: Float, to: Float, dur: Long,
+                  interp: TimeInterpolator, onEnd: (() -> Unit)?
+              ) {
+                  animator?.cancel()
+                  val a = ValueAnimator.ofFloat(from, to)
+                  a.duration = dur
+                  a.interpolator = interp
+                  a.addUpdateListener { applyProgress(v, it.animatedValue as Float) }
+                  if (onEnd != null) {
+                      a.addListener(object : AnimatorListenerAdapter() {
+                          override fun onAnimationEnd(animation: Animator) {
+                              onEnd()
+                          }
+                      })
+                  }
+                  animator = a
+                  a.start()
+              }
+
+              /** p = 0: small, faded and blurred. p = 1: full pill, sharp. */
+              private fun applyProgress(v: ChargePillView, p: Float) {
+                  val q = p.coerceIn(0f, 1.15f)
+                  v.scaleX = 0.35f + 0.65f * q
+                  v.scaleY = 0.7f + 0.3f * q
+                  v.alpha = (p * 2f).coerceIn(0f, 1f)
+                  if (Build.VERSION.SDK_INT >= 31) {
+                      val r = 22f * (1f - p.coerceIn(0f, 1f))
+                      v.setRenderEffect(
+                          if (r > 0.5f) RenderEffect.createBlurEffect(r, r, Shader.TileMode.CLAMP) else null
+                      )
+                  }
+              }
+
+              private fun batteryLevel(): Int {
+                  val i = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return 100
+                  val lvl = i.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+                  val scale = i.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
+                  return if (lvl >= 0) (lvl * 100f / scale).toInt() else 100
+              }
+
+              @Suppress("DEPRECATION")
+              private fun vibrate() {
+                  try {
+                      val vib = getSystemService(VIBRATOR_SERVICE) as Vibrator
+                      vib.vibrate(VibrationEffect.createOneShot(30, VibrationEffect.DEFAULT_AMPLITUDE))
+                  } catch (e: Exception) {
+                  }
+              }
+
+              // ---------- foreground notification ----------
+
+              private fun startAsForeground() {
+                  val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                  nm.createNotificationChannel(
+                      NotificationChannel("charge", "Charging animation", NotificationManager.IMPORTANCE_MIN)
+                  )
+                  val n = Notification.Builder(this, "charge")
+                      .setSmallIcon(android.R.drawable.stat_notify_more)
+                      .setContentTitle("iOS charging animation running")
+                      .build()
+                  ServiceCompat.startForeground(
+                      this, 1, n,
+                      if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
+                  )
+              }
+          }
+          EOF_FILE
+          mkdir -p charge/app/src/main/java/com/example/chargepill
+          cat > charge/app/src/main/java/com/example/chargepill/MainActivity.kt <<'EOF_FILE'
+          package com.example.chargepill
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.widget.Button
+          import android.widget.CheckBox
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.SeekBar
+          import android.widget.TextView
+          import android.widget.Toast
+
+          class MainActivity : Activity() {
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val prefs = getSharedPreferences("prefs", MODE_PRIVATE)
+                  val d = resources.displayMetrics.density
+                  fun px(v: Int) = (v * d).toInt()
+
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(px(24), px(48), px(24), px(32))
+                  }
+
+                  fun button(label: String, onClick: () -> Unit) {
+                      root.addView(Button(this).apply {
+                          text = label
+                          setOnClickListener { onClick() }
+                      })
+                  }
+
+                  fun addSeek(title: String, key: String, lo: Int, hi: Int, def: Int, unit: String) {
+                      val label = TextView(this).apply { setPadding(0, px(14), 0, 0) }
+                      val bar = SeekBar(this).apply {
+                          max = hi - lo
+                          progress = prefs.getInt(key, def) - lo
+                      }
+                      fun upd() { label.text = title + ": " + (bar.progress + lo) + unit }
+                      upd()
+                      bar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                          override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                              prefs.edit().putInt(key, p + lo).apply()
+                              upd()
+                          }
+                          override fun onStartTrackingTouch(s: SeekBar?) {}
+                          override fun onStopTrackingTouch(s: SeekBar?) {}
+                      })
+                      root.addView(label)
+                      root.addView(bar)
+                  }
+
+                  root.addView(TextView(this).apply {
+                      text = "iOS Charging"
+                      textSize = 26f
+                  })
+                  root.addView(TextView(this).apply {
+                      text = "Plays an iPhone-style charging pill at the top of the screen when " +
+                              "you plug in. Use Test to preview it without plugging in."
+                      setPadding(0, px(8), 0, px(16))
+                  })
+
+                  button("1. Allow display over other apps") {
+                      startActivity(
+                          Intent(
+                              Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                              Uri.parse("package:" + packageName)
+                          )
+                      )
+                  }
+                  button("2. Allow notifications") {
+                      if (Build.VERSION.SDK_INT >= 33) {
+                          requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+                      }
+                  }
+                  button("3. Start") {
+                      if (!Settings.canDrawOverlays(this)) {
+                          Toast.makeText(this, "Grant overlay permission first", Toast.LENGTH_SHORT).show()
+                      } else {
+                          startForegroundService(Intent(this, ChargeService::class.java))
+                      }
+                  }
+                  button("Test animation") {
+                      if (!Settings.canDrawOverlays(this)) {
+                          Toast.makeText(this, "Grant overlay permission first", Toast.LENGTH_SHORT).show()
+                      } else {
+                          startForegroundService(
+                              Intent(this, ChargeService::class.java).setAction(ChargeService.ACTION_TEST)
+                          )
+                      }
+                  }
+                  button("Stop") {
+                      stopService(Intent(this, ChargeService::class.java))
+                  }
+
+                  addSeek("Pill width", "w", 190, 360, 230, " dp")
+                  addSeek("Pill height", "h", 28, 60, 36, " dp")
+                  addSeek("Distance from top of screen", "top", 0, 60, 6, " dp")
+                  addSeek("Stays on screen for", "hold", 1, 8, 3, " s")
+
+                  root.addView(CheckBox(this).apply {
+                      text = "Vibrate when it appears"
+                      isChecked = prefs.getBoolean("vibrate", true)
+                      setOnCheckedChangeListener { _, c -> prefs.edit().putBoolean("vibrate", c).apply() }
+                  })
+
+                  setContentView(ScrollView(this).apply { addView(root) })
+              }
+          }
+          EOF_FILE
+          mkdir -p charge
+          cat > charge/build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_FILE
+          mkdir -p charge
+          cat > charge/gradle.properties <<'EOF_FILE'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF_FILE
+          mkdir -p charge
+          cat > charge/settings.gradle.kts <<'EOF_FILE'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "ChargeAnim"
+          include(":app")
+          EOF_FILE
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - run: gradle assembleDebug
+        working-directory: charge
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChargeAnimation-apk
+          path: charge/app/build/outputs/apk/debug/app-debug.apk
