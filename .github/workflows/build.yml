@@ -1,4 +1,4 @@
-name: Build APK
+name: Build Clock APK
 on:
   push:
   workflow_dispatch:
@@ -13,51 +13,19 @@ jobs:
           java-version: 17
       - name: Create app files
         run: |
-          mkdir -p .
-          cat > settings.gradle.kts <<'EOF_FILE'
-          pluginManagement {
-              repositories {
-                  google()
-                  mavenCentral()
-                  gradlePluginPortal()
-              }
-          }
-          dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
-          rootProject.name = "IosStatusBar"
-          include(":app")
-          EOF_FILE
-          mkdir -p .
-          cat > build.gradle.kts <<'EOF_FILE'
-          plugins {
-              id("com.android.application") version "8.5.2" apply false
-              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
-          }
-          EOF_FILE
-          mkdir -p .
-          cat > gradle.properties <<'EOF_FILE'
-          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
-          android.useAndroidX=true
-          kotlin.code.style=official
-          EOF_FILE
-          mkdir -p app
-          cat > app/build.gradle.kts <<'EOF_FILE'
+          mkdir -p clock/app
+          cat > clock/app/build.gradle.kts <<'EOF_FILE'
           plugins {
               id("com.android.application")
               id("org.jetbrains.kotlin.android")
           }
 
           android {
-              namespace = "com.example.iosstatusbar"
+              namespace = "com.example.glassclock"
               compileSdk = 34
 
               defaultConfig {
-                  applicationId = "com.example.iosstatusbar"
+                  applicationId = "com.example.glassclock"
                   minSdk = 26
                   targetSdk = 34
                   versionCode = 1
@@ -77,25 +45,16 @@ jobs:
                   jvmTarget = "17"
               }
           }
-
-          dependencies {
-              implementation("androidx.core:core-ktx:1.13.1")
-          }
           EOF_FILE
-          mkdir -p app/src/main
-          cat > app/src/main/AndroidManifest.xml <<'EOF_FILE'
+          mkdir -p clock/app/src/main
+          cat > clock/app/src/main/AndroidManifest.xml <<'EOF_FILE'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-
               <application
                   android:allowBackup="true"
-                  android:label="iOS Battery"
-                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  android:label="Glass Clock"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
 
                   <activity
                       android:name=".MainActivity"
@@ -106,425 +65,288 @@ jobs:
                       </intent-filter>
                   </activity>
 
-                  <service
-                      android:name=".OverlayService"
-                      android:exported="false"
-                      android:foregroundServiceType="specialUse">
-                      <property
-                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                          android:value="Draws a custom battery icon over the status bar" />
-                  </service>
+                  <receiver
+                      android:name=".GlassTextWidget"
+                      android:exported="true"
+                      android:label="Glass Clock (digits only)">
+                      <intent-filter>
+                          <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.appwidget.provider"
+                          android:resource="@xml/widget_text_info" />
+                  </receiver>
+
+                  <receiver
+                      android:name=".GlassCardWidget"
+                      android:exported="true"
+                      android:label="Glass Clock (glass card)">
+                      <intent-filter>
+                          <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.appwidget.provider"
+                          android:resource="@xml/widget_card_info" />
+                  </receiver>
               </application>
           </manifest>
           EOF_FILE
-          mkdir -p app/src/main/java/com/example/iosstatusbar
-          cat > app/src/main/java/com/example/iosstatusbar/BatteryView.kt <<'EOF_FILE'
-          package com.example.iosstatusbar
+          mkdir -p clock/app/src/main/java/com/example/glassclock
+          cat > clock/app/src/main/java/com/example/glassclock/GlassWidgets.kt <<'EOF_FILE'
+          package com.example.glassclock
 
-          import android.content.Context
-          import android.graphics.Canvas
-          import android.graphics.Color
-          import android.graphics.Paint
-          import android.graphics.Path
-          import android.graphics.RectF
-          import android.view.View
-          import kotlin.math.max
-
-          /** iOS-style battery icon. Drawn in "dp units" and scaled by sizeScale. */
-          class BatteryView(
-              context: Context,
-              private val dark: Boolean,       // true = dark icon (for light backgrounds)
-              private val sizeScale: Float,    // 1.0 = normal size
-              private val bgColor: Int         // Color.TRANSPARENT = no background
-          ) : View(context) {
-
-              var level = 100
-              var charging = false
-              var powerSave = false
-
-              companion object {
-                  const val UNITS_W = 28f
-                  const val UNITS_H = 12.5f
-              }
-
-              private val fg = if (dark) Color.BLACK else Color.WHITE
-              private val green = 0xFF30D158.toInt()
-              private val yellow = 0xFFFFD60A.toInt()
-              private val red = 0xFFFF453A.toInt()
-
-              private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-              private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                  style = Paint.Style.STROKE
-                  strokeWidth = 1.1f
-              }
-              private val rect = RectF()
-              private val bolt = Path()
-
-              override fun onDraw(c: Canvas) {
-                  if (bgColor != Color.TRANSPARENT) c.drawColor(bgColor)
-
-                  val unit = resources.displayMetrics.density * sizeScale
-                  val ox = (width - UNITS_W * unit) / 2f
-                  val oy = (height - UNITS_H * unit) / 2f
-                  c.save()
-                  c.translate(ox, oy)
-                  c.scale(unit, unit)
-
-                  val stateColor = when {
-                      charging -> green
-                      powerSave -> yellow
-                      level <= 20 -> red
-                      else -> fg
-                  }
-
-                  // outline
-                  strokePaint.color = fg
-                  strokePaint.alpha = 100
-                  rect.set(0.55f, 0.55f, 24.45f, 11.95f)
-                  c.drawRoundRect(rect, 4f, 4f, strokePaint)
-
-                  // nub
-                  fillPaint.color = fg
-                  fillPaint.alpha = 100
-                  rect.set(26.2f, 4.05f, 28f, 8.45f)
-                  c.drawRoundRect(rect, 1f, 1f, fillPaint)
-
-                  // level fill
-                  val frac = level.coerceIn(0, 100) / 100f
-                  val fillW = max(3f, 21f * frac)
-                  fillPaint.color = stateColor
-                  fillPaint.alpha = 255
-                  rect.set(2f, 2f, 2f + fillW, 10.5f)
-                  c.drawRoundRect(rect, 2.3f, 2.3f, fillPaint)
-
-                  // charging bolt
-                  if (charging) {
-                      val bh = 11.5f
-                      val bw = bh * 0.62f
-                      val bx = 12.5f - bw / 2f
-                      val by = 6.25f - bh / 2f
-                      bolt.reset()
-                      bolt.moveTo(bx + bw * 0.62f, by)
-                      bolt.lineTo(bx + bw * 0.05f, by + bh * 0.58f)
-                      bolt.lineTo(bx + bw * 0.46f, by + bh * 0.58f)
-                      bolt.lineTo(bx + bw * 0.36f, by + bh)
-                      bolt.lineTo(bx + bw * 0.98f, by + bh * 0.38f)
-                      bolt.lineTo(bx + bw * 0.55f, by + bh * 0.38f)
-                      bolt.close()
-                      fillPaint.color = Color.WHITE
-                      c.drawPath(bolt, fillPaint)
-                  }
-
-                  c.restore()
-              }
-          }
-          EOF_FILE
-          mkdir -p app/src/main/java/com/example/iosstatusbar
-          cat > app/src/main/java/com/example/iosstatusbar/OverlayService.kt <<'EOF_FILE'
-          package com.example.iosstatusbar
-
-          import android.app.Notification
-          import android.app.NotificationChannel
-          import android.app.NotificationManager
-          import android.app.Service
-          import android.content.BroadcastReceiver
+          import android.app.PendingIntent
+          import android.appwidget.AppWidgetManager
+          import android.appwidget.AppWidgetProvider
           import android.content.Context
           import android.content.Intent
-          import android.content.IntentFilter
-          import android.content.pm.ServiceInfo
-          import android.graphics.Color
-          import android.graphics.PixelFormat
-          import android.os.BatteryManager
-          import android.os.Build
-          import android.os.IBinder
-          import android.os.PowerManager
-          import android.view.Gravity
-          import android.view.WindowManager
-          import androidx.core.app.ServiceCompat
-          import kotlin.math.ceil
+          import android.provider.AlarmClock
+          import android.widget.RemoteViews
 
-          class OverlayService : Service() {
-
-              private lateinit var wm: WindowManager
-              private var view: BatteryView? = null
-
-              private val receiver = object : BroadcastReceiver() {
-                  override fun onReceive(context: Context?, intent: Intent?) {
-                      updateBattery()
+          abstract class GlassBase(private val layoutId: Int) : AppWidgetProvider() {
+              override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) {
+                  for (id in ids) {
+                      val views = RemoteViews(context.packageName, layoutId)
+                      val intent = Intent(AlarmClock.ACTION_SHOW_ALARMS)
+                          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                      val pi = PendingIntent.getActivity(
+                          context, 0, intent,
+                          PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                      )
+                      views.setOnClickPendingIntent(R.id.root, pi)
+                      manager.updateAppWidget(id, views)
                   }
-              }
-
-              override fun onBind(intent: Intent?): IBinder? = null
-
-              override fun onCreate() {
-                  super.onCreate()
-                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
-
-                  val filter = IntentFilter().apply {
-                      addAction(Intent.ACTION_BATTERY_CHANGED)
-                      addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
-                  }
-                  registerReceiver(receiver, filter)
-              }
-
-              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-                  startAsForeground()
-                  getSharedPreferences("prefs", MODE_PRIVATE).edit().putBoolean("running", true).apply()
-                  rebuildView()
-                  return START_STICKY
-              }
-
-              override fun onDestroy() {
-                  getSharedPreferences("prefs", MODE_PRIVATE).edit().putBoolean("running", false).apply()
-                  try { unregisterReceiver(receiver) } catch (e: Exception) {}
-                  removeView()
-                  super.onDestroy()
-              }
-
-              private fun rebuildView() {
-                  removeView()
-                  val prefs = getSharedPreferences("prefs", MODE_PRIVATE)
-                  val scale = prefs.getInt("size", 100) / 100f
-                  val xDp = prefs.getInt("x", 16)
-                  val yDp = prefs.getInt("y", 0)
-                  val padDp = prefs.getInt("pad", 4)
-                  val dark = prefs.getBoolean("dark", false)
-                  val bg = when (prefs.getInt("bg", 0)) {
-                      1 -> Color.BLACK
-                      2 -> Color.WHITE
-                      3 -> 0xFF1C1C1E.toInt()
-                      else -> Color.TRANSPARENT
-                  }
-                  val d = resources.displayMetrics.density
-
-                  val pad = padDp * d
-                  val w = ceil(BatteryView.UNITS_W * d * scale + 2 * pad).toInt()
-                  val h = ceil(BatteryView.UNITS_H * d * scale + 2 * pad).toInt()
-                  val sbh = statusBarHeight()
-
-                  val v = BatteryView(this, dark, scale, bg)
-
-                  val lp = WindowManager.LayoutParams(
-                      w,
-                      h,
-                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                              WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                              WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                              WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                              WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                      PixelFormat.TRANSLUCENT
-                  ).apply {
-                      gravity = Gravity.TOP or Gravity.END
-                      x = (xDp * d - pad).toInt()
-                      y = ((sbh - h) / 2f + yDp * d).toInt()
-                      if (Build.VERSION.SDK_INT >= 28) {
-                          layoutInDisplayCutoutMode =
-                              WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-                      }
-                  }
-
-                  wm.addView(v, lp)
-                  view = v
-                  updateBattery()
-              }
-
-              private fun removeView() {
-                  view?.let {
-                      try { wm.removeView(it) } catch (e: Exception) {}
-                  }
-                  view = null
-              }
-
-              private fun statusBarHeight(): Int {
-                  val id = resources.getIdentifier("status_bar_height", "dimen", "android")
-                  return if (id > 0) resources.getDimensionPixelSize(id)
-                  else (28 * resources.displayMetrics.density).toInt()
-              }
-
-              private fun updateBattery() {
-                  val v = view ?: return
-                  val i = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return
-                  val lvl = i.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
-                  val scale = i.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
-                  val plugged = i.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
-                  val pm = getSystemService(POWER_SERVICE) as PowerManager
-
-                  v.level = if (lvl >= 0) (lvl * 100f / scale).toInt() else 100
-                  v.charging = plugged != 0
-                  v.powerSave = pm.isPowerSaveMode
-                  v.invalidate()
-              }
-
-              private fun startAsForeground() {
-                  val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-                  nm.createNotificationChannel(
-                      NotificationChannel("overlay", "Battery overlay", NotificationManager.IMPORTANCE_MIN)
-                  )
-                  val n = Notification.Builder(this, "overlay")
-                      .setSmallIcon(android.R.drawable.stat_notify_more)
-                      .setContentTitle("iOS battery icon running")
-                      .build()
-
-                  ServiceCompat.startForeground(
-                      this, 1, n,
-                      if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
-                  )
               }
           }
-          EOF_FILE
-          mkdir -p app/src/main/java/com/example/iosstatusbar
-          cat > app/src/main/java/com/example/iosstatusbar/MainActivity.kt <<'EOF_FILE'
-          package com.example.iosstatusbar
 
-          import android.Manifest
+          class GlassTextWidget : GlassBase(R.layout.widget_text)
+
+          class GlassCardWidget : GlassBase(R.layout.widget_card)
+          EOF_FILE
+          mkdir -p clock/app/src/main/java/com/example/glassclock
+          cat > clock/app/src/main/java/com/example/glassclock/MainActivity.kt <<'EOF_FILE'
+          package com.example.glassclock
+
           import android.app.Activity
-          import android.content.Intent
-          import android.net.Uri
-          import android.os.Build
           import android.os.Bundle
-          import android.provider.Settings
-          import android.view.View
-          import android.widget.Button
-          import android.widget.CheckBox
           import android.widget.LinearLayout
-          import android.widget.RadioButton
-          import android.widget.RadioGroup
-          import android.widget.ScrollView
-          import android.widget.SeekBar
           import android.widget.TextView
-          import android.widget.Toast
 
           class MainActivity : Activity() {
-
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
-                  val prefs = getSharedPreferences("prefs", MODE_PRIVATE)
                   val d = resources.displayMetrics.density
-                  fun px(v: Int) = (v * d).toInt()
-
+                  val pad = (24 * d).toInt()
                   val root = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
-                      setPadding(px(24), px(48), px(24), px(32))
+                      setPadding(pad, pad * 2, pad, pad)
                   }
-
-                  fun applyLive() {
-                      if (prefs.getBoolean("running", false) && Settings.canDrawOverlays(this)) {
-                          startForegroundService(Intent(this, OverlayService::class.java))
-                      }
-                  }
-
-                  fun button(label: String, onClick: () -> Unit) {
-                      root.addView(Button(this).apply {
-                          text = label
-                          setOnClickListener { onClick() }
-                      })
-                  }
-
-                  fun addSeek(title: String, key: String, lo: Int, hi: Int, def: Int, unit: String) {
-                      val label = TextView(this).apply { setPadding(0, px(14), 0, 0) }
-                      val bar = SeekBar(this).apply {
-                          max = hi - lo
-                          progress = prefs.getInt(key, def) - lo
-                      }
-                      fun upd() { label.text = title + ": " + (bar.progress + lo) + unit }
-                      upd()
-                      bar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                          override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
-                              prefs.edit().putInt(key, p + lo).apply()
-                              upd()
-                          }
-                          override fun onStartTrackingTouch(s: SeekBar?) {}
-                          override fun onStopTrackingTouch(s: SeekBar?) { applyLive() }
-                      })
-                      root.addView(label)
-                      root.addView(bar)
-                  }
-
                   root.addView(TextView(this).apply {
-                      text = "iOS Battery"
+                      text = "Glass Clock"
                       textSize = 26f
                   })
                   root.addView(TextView(this).apply {
-                      text = "Draws an iOS-style battery icon over your status bar. " +
-                              "Changes apply live once it is started."
-                      setPadding(0, px(8), 0, px(16))
+                      text = "This app has no settings. It adds two clock widgets:\n\n" +
+                              "- Glass Clock (digits only)\n" +
+                              "- Glass Clock (glass card)\n\n" +
+                              "Home screen: long-press the home screen, tap Widgets, find Glass Clock.\n\n" +
+                              "Lock screen: Good Lock > LockStar > add App widgets, then pick Glass Clock."
+                      setPadding(0, (16 * d).toInt(), 0, 0)
                   })
-
-                  button("1. Allow display over other apps") {
-                      startActivity(
-                          Intent(
-                              Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                              Uri.parse("package:" + packageName)
-                          )
-                      )
-                  }
-                  button("2. Allow notifications") {
-                      if (Build.VERSION.SDK_INT >= 33) {
-                          requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
-                      }
-                  }
-                  button("3. Start") {
-                      if (!Settings.canDrawOverlays(this)) {
-                          Toast.makeText(this, "Grant overlay permission first", Toast.LENGTH_SHORT).show()
-                      } else {
-                          startForegroundService(Intent(this, OverlayService::class.java))
-                      }
-                  }
-                  button("Stop") {
-                      stopService(Intent(this, OverlayService::class.java))
-                  }
-
-                  addSeek("Battery size", "size", 50, 300, 100, "%")
-                  addSeek("Left / right (distance from right edge)", "x", 0, 200, 16, " dp")
-                  addSeek("Up / down", "y", -40, 40, 0, "")
-                  addSeek("Cover margin around battery", "pad", 0, 20, 4, " dp")
-
-                  root.addView(TextView(this).apply {
-                      text = "Background behind the battery"
-                      setPadding(0, px(18), 0, 0)
-                  })
-                  val names = arrayOf("Transparent", "Black", "White", "Dark gray")
-                  val group = RadioGroup(this)
-                  val ids = ArrayList<Int>()
-                  for (n in names) {
-                      val rb = RadioButton(this)
-                      rb.text = n
-                      rb.id = View.generateViewId()
-                      ids.add(rb.id)
-                      group.addView(rb)
-                  }
-                  group.check(ids[prefs.getInt("bg", 0).coerceIn(0, 3)])
-                  group.setOnCheckedChangeListener { _, checkedId ->
-                      prefs.edit().putInt("bg", ids.indexOf(checkedId)).apply()
-                      applyLive()
-                  }
-                  root.addView(group)
-                  root.addView(TextView(this).apply {
-                      text = "Transparent shows whatever is underneath, including the original " +
-                              "battery. To hide the original, pick a colour that matches your " +
-                              "status bar and raise the cover margin just enough."
-                      textSize = 12f
-                  })
-
-                  root.addView(CheckBox(this).apply {
-                      text = "Dark icon (for light backgrounds)"
-                      isChecked = prefs.getBoolean("dark", false)
-                      setOnCheckedChangeListener { _, c ->
-                          prefs.edit().putBoolean("dark", c).apply()
-                          applyLive()
-                      }
-                  })
-
-                  setContentView(ScrollView(this).apply { addView(root) })
+                  setContentView(root)
               }
           }
+          EOF_FILE
+          mkdir -p clock/app/src/main/res/drawable
+          cat > clock/app/src/main/res/drawable/glass_card.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android"
+              android:shape="rectangle">
+              <gradient
+                  android:angle="315"
+                  android:startColor="#52FFFFFF"
+                  android:endColor="#14FFFFFF" />
+              <stroke
+                  android:width="1dp"
+                  android:color="#73FFFFFF" />
+              <corners android:radius="34dp" />
+          </shape>
+          EOF_FILE
+          mkdir -p clock/app/src/main/res/layout
+          cat > clock/app/src/main/res/layout/widget_card.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:id="@+id/root"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:background="@drawable/glass_card"
+              android:gravity="center"
+              android:orientation="vertical"
+              android:padding="12dp">
+
+              <TextClock
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:format12Hour="EEEE d MMMM"
+                  android:format24Hour="EEEE d MMMM"
+                  android:fontFamily="sans-serif-medium"
+                  android:shadowColor="#40000000"
+                  android:shadowDx="0"
+                  android:shadowDy="2"
+                  android:shadowRadius="8"
+                  android:textColor="#E6FFFFFF"
+                  android:textSize="18sp" />
+
+              <TextClock
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:format12Hour="h"
+                  android:format24Hour="HH"
+                  android:fontFamily="sans-serif-black"
+                  android:includeFontPadding="false"
+                  android:shadowColor="#59000000"
+                  android:shadowDx="0"
+                  android:shadowDy="6"
+                  android:shadowRadius="16"
+                  android:textColor="#B3FFFFFF"
+                  android:textSize="92sp" />
+
+              <TextClock
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="-14dp"
+                  android:format12Hour="mm"
+                  android:format24Hour="mm"
+                  android:fontFamily="sans-serif-black"
+                  android:includeFontPadding="false"
+                  android:shadowColor="#59000000"
+                  android:shadowDx="0"
+                  android:shadowDy="6"
+                  android:shadowRadius="16"
+                  android:textColor="#B3FFFFFF"
+                  android:textSize="92sp" />
+          </LinearLayout>
+          EOF_FILE
+          mkdir -p clock/app/src/main/res/layout
+          cat > clock/app/src/main/res/layout/widget_text.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:id="@+id/root"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:gravity="center"
+              android:orientation="vertical"
+              android:padding="8dp">
+
+              <TextClock
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:format12Hour="EEEE d MMMM"
+                  android:format24Hour="EEEE d MMMM"
+                  android:fontFamily="sans-serif-medium"
+                  android:shadowColor="#40000000"
+                  android:shadowDx="0"
+                  android:shadowDy="2"
+                  android:shadowRadius="8"
+                  android:textColor="#D9FFFFFF"
+                  android:textSize="18sp" />
+
+              <TextClock
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:format12Hour="h"
+                  android:format24Hour="HH"
+                  android:fontFamily="sans-serif-black"
+                  android:includeFontPadding="false"
+                  android:shadowColor="#59000000"
+                  android:shadowDx="0"
+                  android:shadowDy="6"
+                  android:shadowRadius="16"
+                  android:textColor="#8CFFFFFF"
+                  android:textSize="92sp" />
+
+              <TextClock
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="-14dp"
+                  android:format12Hour="mm"
+                  android:format24Hour="mm"
+                  android:fontFamily="sans-serif-black"
+                  android:includeFontPadding="false"
+                  android:shadowColor="#59000000"
+                  android:shadowDx="0"
+                  android:shadowDy="6"
+                  android:shadowRadius="16"
+                  android:textColor="#8CFFFFFF"
+                  android:textSize="92sp" />
+          </LinearLayout>
+          EOF_FILE
+          mkdir -p clock/app/src/main/res/xml
+          cat > clock/app/src/main/res/xml/widget_card_info.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+              android:minWidth="180dp"
+              android:minHeight="230dp"
+              android:targetCellWidth="3"
+              android:targetCellHeight="3"
+              android:initialLayout="@layout/widget_card"
+              android:previewLayout="@layout/widget_card"
+              android:resizeMode="horizontal|vertical"
+              android:updatePeriodMillis="0"
+              android:widgetCategory="home_screen|keyguard" />
+          EOF_FILE
+          mkdir -p clock/app/src/main/res/xml
+          cat > clock/app/src/main/res/xml/widget_text_info.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+              android:minWidth="180dp"
+              android:minHeight="230dp"
+              android:targetCellWidth="3"
+              android:targetCellHeight="3"
+              android:initialLayout="@layout/widget_text"
+              android:previewLayout="@layout/widget_text"
+              android:resizeMode="horizontal|vertical"
+              android:updatePeriodMillis="0"
+              android:widgetCategory="home_screen|keyguard" />
+          EOF_FILE
+          mkdir -p clock
+          cat > clock/build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_FILE
+          mkdir -p clock
+          cat > clock/gradle.properties <<'EOF_FILE'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF_FILE
+          mkdir -p clock
+          cat > clock/settings.gradle.kts <<'EOF_FILE'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "GlassClock"
+          include(":app")
           EOF_FILE
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
       - run: gradle assembleDebug
+        working-directory: clock
       - uses: actions/upload-artifact@v4
         with:
-          name: IosStatusBar-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: GlassClock-apk
+          path: clock/app/build/outputs/apk/debug/app-debug.apk
