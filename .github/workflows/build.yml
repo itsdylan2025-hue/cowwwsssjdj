@@ -11,6 +11,589 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+      - name: Create app files
+        run: |
+          mkdir -p .
+          cat > settings.gradle.kts <<'EOF_FILE'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "IosStatusBar"
+          include(":app")
+          EOF_FILE
+          mkdir -p .
+          cat > build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_FILE
+          mkdir -p .
+          cat > gradle.properties <<'EOF_FILE'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF_FILE
+          mkdir -p app
+          cat > app/build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.iosstatusbar"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.example.iosstatusbar"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+          }
+          EOF_FILE
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+
+              <application
+                  android:allowBackup="true"
+                  android:label="iOS Status Bar"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".OverlayService"
+                      android:exported="false"
+                      android:foregroundServiceType="specialUse">
+                      <property
+                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="Draws custom battery and Wi-Fi icons over the status bar" />
+                  </service>
+              </application>
+          </manifest>
+          EOF_FILE
+          mkdir -p app/src/main/java/com/example/iosstatusbar
+          cat > app/src/main/java/com/example/iosstatusbar/StatusBarView.kt <<'EOF_FILE'
+          package com.example.iosstatusbar
+
+          import android.content.Context
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.graphics.Path
+          import android.graphics.RectF
+          import android.graphics.Typeface
+          import android.view.View
+          import kotlin.math.max
+
+          /**
+           * Draws iOS-style signal bars, Wi-Fi, battery percentage and battery icon.
+           * Opaque background so the real (Samsung) icons underneath are hidden.
+           */
+          class StatusBarView(
+              context: Context,
+              private val light: Boolean,        // true = white background, dark icons
+              private val showPercent: Boolean
+          ) : View(context) {
+
+              var level = 100
+              var charging = false
+              var powerSave = false
+              var wifiConnected = false
+              var wifiBars = 3        // 0..3 arcs
+              var cellBars = 4        // 0..4 bars
+
+              private val density = resources.displayMetrics.density
+              private fun dp(v: Float) = v * density
+
+              private val fg = if (light) Color.BLACK else Color.WHITE
+              private val bg = if (light) Color.WHITE else Color.BLACK
+
+              private val green = 0xFF30D158.toInt()
+              private val yellow = 0xFFFFD60A.toInt()
+              private val red = 0xFFFF453A.toInt()
+
+              private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+              private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  style = Paint.Style.STROKE
+                  strokeCap = Paint.Cap.ROUND
+              }
+              private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                  textSize = dp(15f)
+                  color = fg
+              }
+
+              private val rect = RectF()
+              private val bolt = Path()
+
+              override fun onDraw(c: Canvas) {
+                  c.drawColor(bg)
+                  val cy = height / 2f
+                  var x = width - dp(14f)
+
+                  // ---- Battery ----
+                  val bodyW = dp(25f)
+                  val bodyH = dp(12.5f)
+                  val nubW = dp(1.8f)
+                  val nubGap = dp(1.2f)
+                  val bodyRight = x - nubGap - nubW
+                  val bodyLeft = bodyRight - bodyW
+                  val top = cy - bodyH / 2f
+                  val bottom = cy + bodyH / 2f
+
+                  val stateColor = when {
+                      charging -> green
+                      powerSave -> yellow
+                      level <= 20 -> red
+                      else -> fg
+                  }
+
+                  // outline
+                  strokePaint.strokeWidth = dp(1.1f)
+                  strokePaint.color = fg
+                  strokePaint.alpha = 100
+                  val half = strokePaint.strokeWidth / 2f
+                  rect.set(bodyLeft + half, top + half, bodyRight - half, bottom - half)
+                  c.drawRoundRect(rect, dp(4f), dp(4f), strokePaint)
+
+                  // nub
+                  fillPaint.color = fg
+                  fillPaint.alpha = 100
+                  rect.set(bodyRight + nubGap, cy - dp(2.2f), bodyRight + nubGap + nubW, cy + dp(2.2f))
+                  c.drawRoundRect(rect, dp(1f), dp(1f), fillPaint)
+
+                  // level fill
+                  val inset = dp(2f)
+                  val innerW = bodyW - inset * 2
+                  val fillW = max(dp(3f), innerW * (level.coerceIn(0, 100) / 100f))
+                  fillPaint.color = stateColor
+                  fillPaint.alpha = 255
+                  rect.set(bodyLeft + inset, top + inset, bodyLeft + inset + fillW, bottom - inset)
+                  c.drawRoundRect(rect, dp(2.3f), dp(2.3f), fillPaint)
+
+                  // charging bolt
+                  if (charging) {
+                      val bh = bodyH - dp(1f)
+                      val bw = bh * 0.62f
+                      val bx = bodyLeft + bodyW / 2f - bw / 2f
+                      val by = cy - bh / 2f
+                      bolt.reset()
+                      bolt.moveTo(bx + bw * 0.62f, by)
+                      bolt.lineTo(bx + bw * 0.05f, by + bh * 0.58f)
+                      bolt.lineTo(bx + bw * 0.46f, by + bh * 0.58f)
+                      bolt.lineTo(bx + bw * 0.36f, by + bh)
+                      bolt.lineTo(bx + bw * 0.98f, by + bh * 0.38f)
+                      bolt.lineTo(bx + bw * 0.55f, by + bh * 0.38f)
+                      bolt.close()
+                      fillPaint.color = Color.WHITE
+                      c.drawPath(bolt, fillPaint)
+                  }
+
+                  x = bodyLeft - dp(5f)
+
+                  // ---- Percentage ----
+                  if (showPercent) {
+                      val s = "${level}%"
+                      val w = textPaint.measureText(s)
+                      val baseline = cy - (textPaint.descent() + textPaint.ascent()) / 2f
+                      textPaint.color = fg
+                      c.drawText(s, x - w, baseline, textPaint)
+                      x -= w + dp(9f)
+                  } else {
+                      x -= dp(4f)
+                  }
+
+                  // ---- Wi-Fi ----
+                  if (wifiConnected) {
+                      val w = dp(21f)
+                      val px = x - w / 2f
+                      val py = cy + dp(6f)
+                      strokePaint.strokeWidth = dp(2.4f)
+                      strokePaint.color = fg
+                      val radii = floatArrayOf(dp(5f), dp(9f), dp(13f))
+                      for (i in 0..2) {
+                          strokePaint.alpha = if (i < wifiBars) 255 else 70
+                          val r = radii[i]
+                          rect.set(px - r, py - r, px + r, py + r)
+                          c.drawArc(rect, 225f, 90f, false, strokePaint)
+                      }
+                      fillPaint.color = fg
+                      fillPaint.alpha = 255
+                      c.drawCircle(px, py, dp(1.8f), fillPaint)
+                      x -= w + dp(7f)
+                  }
+
+                  // ---- Signal bars ----
+                  val barW = dp(3.2f)
+                  val barGap = dp(1.6f)
+                  val heights = floatArrayOf(dp(4.5f), dp(7f), dp(9.5f), dp(12f))
+                  val totalW = barW * 4 + barGap * 3
+                  val left = x - totalW
+                  val barBottom = cy + dp(6f)
+                  for (i in 0..3) {
+                      fillPaint.color = fg
+                      fillPaint.alpha = if (i < cellBars) 255 else 70
+                      val l = left + i * (barW + barGap)
+                      rect.set(l, barBottom - heights[i], l + barW, barBottom)
+                      c.drawRoundRect(rect, dp(1f), dp(1f), fillPaint)
+                  }
+              }
+          }
+          EOF_FILE
+          mkdir -p app/src/main/java/com/example/iosstatusbar
+          cat > app/src/main/java/com/example/iosstatusbar/OverlayService.kt <<'EOF_FILE'
+          package com.example.iosstatusbar
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.content.pm.ServiceInfo
+          import android.graphics.PixelFormat
+          import android.net.ConnectivityManager
+          import android.net.NetworkCapabilities
+          import android.net.wifi.WifiManager
+          import android.os.BatteryManager
+          import android.os.Build
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import android.os.PowerManager
+          import android.telephony.TelephonyManager
+          import android.view.Gravity
+          import android.view.WindowManager
+          import androidx.core.app.ServiceCompat
+
+          class OverlayService : Service() {
+
+              private lateinit var wm: WindowManager
+              private var view: StatusBarView? = null
+              private val handler = Handler(Looper.getMainLooper())
+
+              private val poll = object : Runnable {
+                  override fun run() {
+                      updateConnectivity()
+                      handler.postDelayed(this, 3000)
+                  }
+              }
+
+              private val receiver = object : BroadcastReceiver() {
+                  override fun onReceive(context: Context?, intent: Intent?) {
+                      updateBattery()
+                  }
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
+
+                  val filter = IntentFilter().apply {
+                      addAction(Intent.ACTION_BATTERY_CHANGED)
+                      addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
+                  }
+                  registerReceiver(receiver, filter)
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  startAsForeground()
+                  rebuildView()
+                  handler.removeCallbacks(poll)
+                  handler.post(poll)
+                  return START_STICKY
+              }
+
+              override fun onDestroy() {
+                  handler.removeCallbacks(poll)
+                  try { unregisterReceiver(receiver) } catch (e: Exception) {}
+                  removeView()
+                  super.onDestroy()
+              }
+
+              // ---------- overlay window ----------
+
+              private fun rebuildView() {
+                  removeView()
+                  val prefs = getSharedPreferences("prefs", MODE_PRIVATE)
+                  val widthDp = prefs.getInt("width", 160)
+                  val light = prefs.getBoolean("light", false)
+                  val percent = prefs.getBoolean("percent", true)
+                  val density = resources.displayMetrics.density
+
+                  val v = StatusBarView(this, light, percent)
+
+                  val lp = WindowManager.LayoutParams(
+                      (widthDp * density).toInt(),
+                      statusBarHeight(),
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                              WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                              WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                              WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                              WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                      PixelFormat.TRANSLUCENT
+                  ).apply {
+                      gravity = Gravity.TOP or Gravity.END
+                      if (Build.VERSION.SDK_INT >= 28) {
+                          layoutInDisplayCutoutMode =
+                              WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                      }
+                  }
+
+                  wm.addView(v, lp)
+                  view = v
+                  updateBattery()
+                  updateConnectivity()
+              }
+
+              private fun removeView() {
+                  view?.let {
+                      try { wm.removeView(it) } catch (e: Exception) {}
+                  }
+                  view = null
+              }
+
+              private fun statusBarHeight(): Int {
+                  val id = resources.getIdentifier("status_bar_height", "dimen", "android")
+                  return if (id > 0) resources.getDimensionPixelSize(id)
+                  else (28 * resources.displayMetrics.density).toInt()
+              }
+
+              // ---------- battery ----------
+
+              private fun updateBattery() {
+                  val v = view ?: return
+                  val i = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return
+                  val lvl = i.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+                  val scale = i.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
+                  val plugged = i.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
+                  val pm = getSystemService(POWER_SERVICE) as PowerManager
+
+                  v.level = if (lvl >= 0) (lvl * 100f / scale).toInt() else 100
+                  v.charging = plugged != 0
+                  v.powerSave = pm.isPowerSaveMode
+                  v.invalidate()
+              }
+
+              // ---------- Wi-Fi + cell ----------
+
+              @Suppress("DEPRECATION")
+              private fun updateConnectivity() {
+                  val v = view ?: return
+
+                  try {
+                      val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+                      val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+                      val onWifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+                      v.wifiConnected = onWifi
+                      if (onWifi) {
+                          val wifi = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+                          val rssi = wifi.connectionInfo.rssi
+                          v.wifiBars = when {
+                              rssi > -60 -> 3
+                              rssi > -70 -> 2
+                              rssi > -80 -> 1
+                              else -> 0
+                          }
+                      }
+                  } catch (e: Exception) {
+                      v.wifiConnected = false
+                  }
+
+                  try {
+                      val tm = getSystemService(TELEPHONY_SERVICE) as TelephonyManager
+                      v.cellBars = if (Build.VERSION.SDK_INT >= 28) {
+                          tm.signalStrength?.level ?: 4
+                      } else 4
+                  } catch (e: Exception) {
+                      v.cellBars = 4
+                  }
+
+                  v.invalidate()
+              }
+
+              // ---------- foreground notification ----------
+
+              private fun startAsForeground() {
+                  val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                  nm.createNotificationChannel(
+                      NotificationChannel("overlay", "Status bar overlay", NotificationManager.IMPORTANCE_MIN)
+                  )
+                  val n = Notification.Builder(this, "overlay")
+                      .setSmallIcon(android.R.drawable.stat_notify_more)
+                      .setContentTitle("iOS status bar overlay running")
+                      .build()
+
+                  ServiceCompat.startForeground(
+                      this, 1, n,
+                      if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
+                  )
+              }
+          }
+          EOF_FILE
+          mkdir -p app/src/main/java/com/example/iosstatusbar
+          cat > app/src/main/java/com/example/iosstatusbar/MainActivity.kt <<'EOF_FILE'
+          package com.example.iosstatusbar
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.widget.Button
+          import android.widget.CheckBox
+          import android.widget.LinearLayout
+          import android.widget.SeekBar
+          import android.widget.TextView
+          import android.widget.Toast
+
+          class MainActivity : Activity() {
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val prefs = getSharedPreferences("prefs", MODE_PRIVATE)
+                  val d = resources.displayMetrics.density
+                  fun px(v: Int) = (v * d).toInt()
+
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(px(24), px(48), px(24), px(24))
+                  }
+
+                  fun button(label: String, onClick: () -> Unit) = Button(this).apply {
+                      text = label
+                      setOnClickListener { onClick() }
+                      root.addView(this)
+                  }
+
+                  root.addView(TextView(this).apply {
+                      text = "iOS Status Bar"
+                      textSize = 26f
+                  })
+                  root.addView(TextView(this).apply {
+                      text = "Draws iOS-style battery and Wi-Fi icons over your system status bar."
+                      setPadding(0, px(8), 0, px(16))
+                  })
+
+                  button("1. Allow display over other apps") {
+                      startActivity(
+                          Intent(
+                              Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                              Uri.parse("package:$packageName")
+                          )
+                      )
+                  }
+
+                  button("2. Allow notifications + phone state") {
+                      val perms = mutableListOf(Manifest.permission.READ_PHONE_STATE)
+                      if (Build.VERSION.SDK_INT >= 33) perms.add(Manifest.permission.POST_NOTIFICATIONS)
+                      requestPermissions(perms.toTypedArray(), 1)
+                  }
+
+                  // Width slider
+                  val widthLabel = TextView(this)
+                  val bar = SeekBar(this).apply {
+                      max = 200 // 80..280 dp
+                      progress = prefs.getInt("width", 160) - 80
+                  }
+                  fun updateLabel() {
+                      widthLabel.text = "Overlay width: ${bar.progress + 80} dp (widen until Samsung icons are fully hidden)"
+                  }
+                  updateLabel()
+                  bar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                      override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                          prefs.edit().putInt("width", p + 80).apply()
+                          updateLabel()
+                      }
+                      override fun onStartTrackingTouch(s: SeekBar?) {}
+                      override fun onStopTrackingTouch(s: SeekBar?) {}
+                  })
+                  widthLabel.setPadding(0, px(16), 0, 0)
+                 root.addView(widthLabel)
+                  root.addView(bar)
+
+                  root.addView(CheckBox(this).apply {
+                      text = "Show battery percentage"
+                      isChecked = prefs.getBoolean("percent", true)
+                      setOnCheckedChangeListener { _, c -> prefs.edit().putBoolean("percent", c).apply() }
+                  })
+                  root.addView(CheckBox(this).apply {
+                      text = "Light mode (white bar, dark icons)"
+                      isChecked = prefs.getBoolean("light", false)
+                      setOnCheckedChangeListener { _, c -> prefs.edit().putBoolean("light", c).apply() }
+                  })
+
+                  button("3. Start / apply changes") {
+                      if (!Settings.canDrawOverlays(this)) {
+                          Toast.makeText(this, "Grant overlay permission first", Toast.LENGTH_SHORT).show()
+                      } else {
+                          startForegroundService(Intent(this, OverlayService::class.java))
+                      }
+                  }
+                  button("Stop") {
+                      stopService(Intent(this, OverlayService::class.java))
+                  }
+
+                  setContentView(root)
+              }
+          }
+          EOF_FILE
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
